@@ -29,9 +29,13 @@ const documentSchema = new mongoose.Schema(
       required: [true, 'Expiry date is required'],
       index: true,
     },
+    gridFsFileId: {
+      type: mongoose.Schema.Types.ObjectId,
+      index: true,
+    },
     encryptedFilePath: {
       type: String,
-      required: true,
+      default: '',
     },
     originalFileName: {
       type: String,

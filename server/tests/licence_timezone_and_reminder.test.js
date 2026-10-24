@@ -75,6 +75,15 @@ test('Licence Expiry "10/10/2026" Timezone & 1-Day Reminder Test', async (t) => 
   });
 
   await t.test('2. Uploading licence via API stores correct date without timezone shifting', async () => {
+    // Generate dynamic tomorrow date so test succeeds on any calendar date
+    const now = new Date();
+    const tomorrow = new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate() + 1, 12, 0, 0));
+    const tomDay = String(tomorrow.getUTCDate()).padStart(2, '0');
+    const tomMonth = String(tomorrow.getUTCMonth() + 1).padStart(2, '0');
+    const tomYear = tomorrow.getUTCFullYear();
+    const tomDmy = `${tomDay}/${tomMonth}/${tomYear}`;
+    const tomYmd = `${tomYear}-${tomMonth}-${tomDay}`;
+
     // Generate SVG for driving licence
     const svg = `
       <svg width="700" height="350" xmlns="http://www.w3.org/2000/svg">
@@ -82,7 +91,7 @@ test('Licence Expiry "10/10/2026" Timezone & 1-Day Reminder Test', async (t) => 
         <text x="40" y="60" font-family="Arial" font-size="22" font-weight="bold" fill="#000000">UNION OF INDIA DRIVING LICENCE</text>
         <text x="40" y="110" font-family="Arial" font-size="18" fill="#000000">LICENCE NO: MH12-20260099881</text>
         <text x="40" y="160" font-family="Arial" font-size="18" fill="#000000">DOB: 15/05/1990</text>
-        <text x="40" y="210" font-family="Arial" font-size="18" fill="#000000">VALID UPTO: 10/10/2026</text>
+        <text x="40" y="210" font-family="Arial" font-size="18" fill="#000000">VALID UPTO: ${tomDmy}</text>
       </svg>
     `;
     const pngBuffer = await sharp(Buffer.from(svg)).png().toBuffer();
@@ -102,7 +111,7 @@ test('Licence Expiry "10/10/2026" Timezone & 1-Day Reminder Test', async (t) => 
     // Verify suggested expiry date
     assert.equal(procData.data.suggestedCategory, 'Driving Licence');
     const isoSuggested = new Date(procData.data.suggestedExpiryDate).toISOString().split('T')[0];
-    assert.equal(isoSuggested, '2026-10-10', 'Suggested date must be 2026-10-10');
+    assert.equal(isoSuggested, tomYmd, `Suggested date must be ${tomYmd}`);
 
     // Confirm and save document
     const saveRes = await fetch(`${baseUrl}/documents`, {
@@ -116,7 +125,7 @@ test('Licence Expiry "10/10/2026" Timezone & 1-Day Reminder Test', async (t) => 
         title: 'Indian Driving Licence',
         category: 'Driving Licence',
         documentNumber: procData.data.suggestedDocNumber || 'MH12-20260099881',
-        expiryDate: '2026-10-10',
+        expiryDate: tomYmd,
         ocrText: procData.data.ocrText,
         ocrConfidence: procData.data.ocrConfidence,
         originalFileName: 'sample_licence.png',
@@ -137,12 +146,11 @@ test('Licence Expiry "10/10/2026" Timezone & 1-Day Reminder Test', async (t) => 
 
     // Stored expiry date checks
     const expDate = new Date(doc.expiryDate);
-    assert.equal(expDate.getUTCDate(), 10, 'Expiry calendar date must be 10 (not 09!)');
-    assert.equal(expDate.getUTCMonth(), 9, 'Expiry calendar month must be October (9)');
-    assert.equal(expDate.getUTCFullYear(), 2026);
+    assert.equal(expDate.getUTCDate(), tomorrow.getUTCDate(), 'Expiry calendar date must match tomorrow');
+    assert.equal(expDate.getUTCMonth(), tomorrow.getUTCMonth());
+    assert.equal(expDate.getUTCFullYear(), tomorrow.getUTCFullYear());
 
     // Check daysUntilExpiry calculation
-    // Since current local time is October 9, 2026 and expiry is October 10, 2026:
     assert.equal(doc.daysUntilExpiry, 1, 'Document expiring tomorrow must have daysUntilExpiry === 1');
   });
 

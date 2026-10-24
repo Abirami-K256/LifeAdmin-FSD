@@ -1,33 +1,7 @@
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
-
-const MISSPELLED_DOMAINS = {
-  'gamil.com': 'gmail.com',
-  'gmial.com': 'gmail.com',
-  'gmai.com': 'gmail.com',
-  'gmail.co': 'gmail.com',
-  'gmail.con': 'gmail.com',
-  'gmaill.com': 'gmail.com',
-  'gmail.in': 'gmail.com',
-  'gamil.in': 'gmail.com',
-  'yahooo.com': 'yahoo.com',
-  'yahoo.con': 'yahoo.com',
-  'hotmial.com': 'hotmail.com',
-  'hotmail.con': 'hotmail.com',
-  'outlok.com': 'outlook.com',
-  'outlook.con': 'outlook.com',
-};
-
-function validateEmail(email) {
-  const basicFormat = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  if (!basicFormat.test(email)) return { valid: false, suggestion: null };
-  const domain = email.split('@')[1].toLowerCase();
-  if (MISSPELLED_DOMAINS[domain]) {
-    return { valid: false, suggestion: MISSPELLED_DOMAINS[domain] };
-  }
-  return { valid: true, suggestion: null };
-}
+const { validateEmail } = require('../utils/emailValidator');
 
 const generateToken = (userId) => {
   return jwt.sign(
@@ -49,13 +23,11 @@ exports.register = async (req, res, next) => {
       });
     }
 
-    const { valid, suggestion } = validateEmail(email);
-    if (!valid) {
+    const emailCheck = validateEmail(email);
+    if (!emailCheck.valid) {
       return res.status(400).json({
         success: false,
-        message: suggestion
-          ? `Invalid email address. Did you mean ${suggestion}?`
-          : 'Please enter a valid email address.',
+        message: emailCheck.error,
       });
     }
 
@@ -67,7 +39,7 @@ exports.register = async (req, res, next) => {
     }
 
     // Check if user already exists
-    const existing = await User.findOne({ email: email.toLowerCase().trim() });
+    const existing = await User.findOne({ email: emailCheck.email });
     if (existing) {
       return res.status(400).json({
         success: false,
@@ -81,7 +53,7 @@ exports.register = async (req, res, next) => {
 
     const user = await User.create({
       name: name.trim(),
-      email: email.toLowerCase().trim(),
+      email: emailCheck.email,
       passwordHash,
     });
 
@@ -115,7 +87,15 @@ exports.login = async (req, res, next) => {
       });
     }
 
-    const user = await User.findOne({ email: email.toLowerCase().trim() });
+    const emailCheck = validateEmail(email);
+    if (!emailCheck.valid) {
+      return res.status(400).json({
+        success: false,
+        message: emailCheck.error,
+      });
+    }
+
+    const user = await User.findOne({ email: emailCheck.email });
     if (!user) {
       return res.status(401).json({
         success: false,
@@ -152,26 +132,53 @@ exports.login = async (req, res, next) => {
 // POST /api/auth/reset-password
 exports.resetPassword = async (req, res, next) => {
   try {
-    const { email, newPassword } = req.body;
+    const { email, newPassword, confirmPassword } = req.body;
 
-    if (!email || !newPassword) {
-      return res.status(400).json({ success: false, message: 'Email and new password are required.' });
+    if (!email || !newPassword || !confirmPassword) {
+      return res.status(400).json({
+        success: false,
+        message: 'Email, new password, and confirm password are required.',
+      });
+    }
+
+    const emailCheck = validateEmail(email);
+    if (!emailCheck.valid) {
+      return res.status(400).json({
+        success: false,
+        message: emailCheck.error,
+      });
     }
 
     if (newPassword.length < 8) {
-      return res.status(400).json({ success: false, message: 'Password must be at least 8 characters long.' });
+      return res.status(400).json({
+        success: false,
+        message: 'New password must be at least 8 characters long.',
+      });
     }
 
-    const user = await User.findOne({ email: email.toLowerCase().trim() });
+    if (newPassword !== confirmPassword) {
+      return res.status(400).json({
+        success: false,
+        message: 'Passwords do not match.',
+      });
+    }
+
+    const user = await User.findOne({ email: emailCheck.email });
     if (!user) {
-      return res.status(404).json({ success: false, message: 'No account found with that email address.' });
+      return res.status(404).json({
+        success: false,
+        message: 'No account found with this email address.',
+      });
     }
 
     const salt = await bcrypt.genSalt(10);
     user.passwordHash = await bcrypt.hash(newPassword, salt);
     await user.save();
 
-    res.status(200).json({ success: true, message: 'Password reset successfully.' });
+    res.status(200).json({
+      success: true,
+      message: 'Password reset successfully. You can now log in.',
+    });
   } catch (err) {
     next(err);
   }

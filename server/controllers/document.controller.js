@@ -1,16 +1,16 @@
 const path = require('path');
 const fs = require('fs');
-const crypto = require('crypto');
+const mongoose = require('mongoose');
 const Document = require('../models/Document');
 const ocrService = require('../services/ocr.service');
 const dateDetector = require('../services/dateDetector.service');
 const { detectCategory, extractDocumentNumber } = require('../utils/categoryKeywords');
-const { encryptAndSave, readAndDecrypt } = require('../services/encryption.service');
-
-const UPLOADS_DIR = path.join(__dirname, '..', 'uploads');
-if (!fs.existsSync(UPLOADS_DIR)) {
-  fs.mkdirSync(UPLOADS_DIR, { recursive: true });
-}
+const {
+  saveEncryptedToGridFS,
+  readAndDecryptFromGridFS,
+  deleteFromGridFS,
+  readAndDecrypt,
+} = require('../services/encryption.service');
 
 /**
  * Parses any incoming date string (YYYY-MM-DD or ISO) into a Date pinned to UTC 12:00:00 (noon).
@@ -43,7 +43,7 @@ function parseCalendarDateToUtcNoon(dateInput) {
 }
 
 // POST /api/documents/process
-// Uploads file to memory, performs OCR & Date detection, encrypts & stores temporary file
+// Uploads file to memory, performs OCR & Date detection, encrypts & stores in MongoDB GridFS
 exports.processDocument = async (req, res, next) => {
   try {
     if (!req.file) {
@@ -71,23 +71,23 @@ exports.processDocument = async (req, res, next) => {
     // 3. Detect expiry date
     const dateDetectionResult = dateDetector.detectExpiryDate(ocrText);
 
-    // 4. Encrypt file with AES-256-GCM and store in uploads directory
-    const uniqueId = crypto.randomUUID();
-    const safeExt = path.extname(originalname);
-    const encryptedFileName = `${uniqueId}${safeExt}.enc`;
-    const encryptedFilePath = path.join(UPLOADS_DIR, encryptedFileName);
-
-    await encryptAndSave(buffer, encryptedFilePath);
+    // 4. Encrypt file with AES-256-GCM and store in MongoDB GridFS (no local disk dependency)
+    const gridFsFileId = await saveEncryptedToGridFS(buffer, originalname, {
+      mimeType: mimetype,
+      originalName: originalname,
+      uploadedBy: req.user._id,
+    });
 
     // Formulate suggested title from filename or category
+    const safeExt = path.extname(originalname);
     const cleanBaseName = path.basename(originalname, safeExt).replace(/[_-]+/g, ' ').trim();
     const suggestedTitle = cleanBaseName.length > 2 ? cleanBaseName : `${guessedCategory} Document`;
 
     res.status(200).json({
       success: true,
-      message: 'File processed and encrypted successfully. Please confirm document details.',
+      message: 'File processed and encrypted successfully in GridFS. Please confirm document details.',
       data: {
-        tempFileId: encryptedFileName,
+        tempFileId: gridFsFileId.toString(),
         originalFileName: originalname,
         mimeType: mimetype,
         ocrText,
@@ -104,7 +104,6 @@ exports.processDocument = async (req, res, next) => {
   }
 };
 
-// POST /api/documents
 // Confirms and saves document to database
 exports.createDocument = async (req, res, next) => {
   try {
@@ -127,14 +126,6 @@ exports.createDocument = async (req, res, next) => {
       });
     }
 
-    const encryptedFilePath = path.join(UPLOADS_DIR, tempFileId);
-    if (!fs.existsSync(encryptedFilePath)) {
-      return res.status(404).json({
-        success: false,
-        message: 'Uploaded file session has expired or file not found. Please upload again.',
-      });
-    }
-
     const parsedExpiry = parseCalendarDateToUtcNoon(expiryDate);
     if (!parsedExpiry) {
       return res.status(400).json({
@@ -143,13 +134,18 @@ exports.createDocument = async (req, res, next) => {
       });
     }
 
+    const gridFsObjectId = mongoose.Types.ObjectId.isValid(tempFileId)
+      ? new mongoose.Types.ObjectId(tempFileId)
+      : null;
+
     const doc = await Document.create({
       userId: req.user._id,
       title: title.trim(),
       category: category || 'Other',
       documentNumber: documentNumber ? documentNumber.trim() : '',
       expiryDate: parsedExpiry,
-      encryptedFilePath,
+      gridFsFileId: gridFsObjectId,
+      encryptedFilePath: tempFileId.toString(),
       originalFileName: originalFileName || 'document',
       mimeType: mimeType || 'application/octet-stream',
       ocrText: ocrText || '',
@@ -214,9 +210,6 @@ exports.getDocuments = async (req, res, next) => {
 exports.getDocumentStats = async (req, res, next) => {
   try {
     const documents = await Document.find({ userId: req.user._id });
-
-    const now = new Date();
-    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
 
     let expiredCount = 0;
     let expiringSoonCount = 0;
@@ -289,7 +282,7 @@ exports.getDocumentById = async (req, res, next) => {
 };
 
 // GET /api/documents/:id/file
-// Decrypts file on the fly and streams to user
+// Decrypts file from GridFS on the fly and streams to user
 exports.getDocumentFile = async (req, res, next) => {
   try {
     const doc = await Document.findOne({
@@ -304,15 +297,22 @@ exports.getDocumentFile = async (req, res, next) => {
       });
     }
 
-    if (!fs.existsSync(doc.encryptedFilePath)) {
+    let decryptedBuffer;
+
+    if (doc.gridFsFileId) {
+      // Primary: Decrypt directly from MongoDB GridFS
+      decryptedBuffer = await readAndDecryptFromGridFS(doc.gridFsFileId);
+    } else if (doc.encryptedFilePath && mongoose.Types.ObjectId.isValid(doc.encryptedFilePath)) {
+      decryptedBuffer = await readAndDecryptFromGridFS(doc.encryptedFilePath);
+    } else if (doc.encryptedFilePath && fs.existsSync(doc.encryptedFilePath)) {
+      // Fallback for legacy local disk files
+      decryptedBuffer = await readAndDecrypt(doc.encryptedFilePath);
+    } else {
       return res.status(404).json({
         success: false,
-        message: 'Encrypted file not found on disk.',
+        message: 'Encrypted document file could not be found.',
       });
     }
-
-    // Decrypt file buffer with AES-256-GCM
-    const decryptedBuffer = await readAndDecrypt(doc.encryptedFilePath);
 
     const isDownload = req.query.download === 'true';
     res.setHeader('Content-Type', doc.mimeType);
@@ -368,7 +368,7 @@ exports.updateDocument = async (req, res, next) => {
 };
 
 // DELETE /api/documents/:id
-// Deletes document and its encrypted file on disk
+// Deletes document and its encrypted file in GridFS
 exports.deleteDocument = async (req, res, next) => {
   try {
     const doc = await Document.findOne({
@@ -383,7 +383,13 @@ exports.deleteDocument = async (req, res, next) => {
       });
     }
 
-    // Remove encrypted file from disk if it exists
+    // Delete encrypted file from GridFS
+    const gridId = doc.gridFsFileId || (mongoose.Types.ObjectId.isValid(doc.encryptedFilePath) ? doc.encryptedFilePath : null);
+    if (gridId) {
+      await deleteFromGridFS(gridId);
+    }
+
+    // Also remove from disk if legacy file exists
     if (doc.encryptedFilePath && fs.existsSync(doc.encryptedFilePath)) {
       try {
         await fs.promises.unlink(doc.encryptedFilePath);

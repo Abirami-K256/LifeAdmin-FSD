@@ -5,7 +5,7 @@ const os = require('os');
 const path = require('path');
 const fs = require('fs');
 
-// Ensure language cache directory is outside the server watch path
+// Ensure language cache directory is in the OS temp folder
 const TESSERACT_CACHE_DIR = path.join(os.tmpdir(), 'lifeadmin-tesseract-cache');
 if (!fs.existsSync(TESSERACT_CACHE_DIR)) {
   try {
@@ -17,7 +17,7 @@ if (!fs.existsSync(TESSERACT_CACHE_DIR)) {
 
 /**
  * Preprocesses an image buffer using sharp to enhance OCR accuracy:
- * - Upscales narrow images
+ * - Resizes images to a maximum of 1600px width to stay within 512 MB of memory
  * - Converts to grayscale
  * - Normalizes contrast
  * - Sharpens text boundaries
@@ -31,9 +31,9 @@ async function preprocessImage(imageBuffer) {
     const metadata = await sharp(imageBuffer).metadata();
     let pipeline = sharp(imageBuffer);
 
-    // If image is narrow, upscale for improved character recognition
-    if (metadata.width && metadata.width < 1600) {
-      pipeline = pipeline.resize({ width: 2000, withoutEnlargement: false, fit: 'inside' });
+    // Resize images to a maximum of 1600px width before OCR (memory constraint on Render free tier)
+    if (metadata.width && metadata.width > 1600) {
+      pipeline = pipeline.resize({ width: 1600, withoutEnlargement: true, fit: 'inside' });
     }
 
     const processedBuffer = await pipeline
@@ -52,7 +52,7 @@ async function preprocessImage(imageBuffer) {
 
 /**
  * Extracts text from an uploaded file buffer (PDF or Image).
- * Fully wrapped with try/catch and resource cleanup so OCR failures cannot crash the server.
+ * Fully wrapped with try/catch, 30s timeout, and resource cleanup.
  *
  * @param {Buffer} fileBuffer
  * @param {string} mimeType
@@ -76,7 +76,7 @@ async function extractTextFromFile(fileBuffer, mimeType) {
     }
   }
 
-  // 2. Preprocess with Sharp
+  // 2. Preprocess with Sharp (enforces max 1600px width)
   let processedBuffer = fileBuffer;
   try {
     processedBuffer = await preprocessImage(fileBuffer);
@@ -85,19 +85,26 @@ async function extractTextFromFile(fileBuffer, mimeType) {
     processedBuffer = fileBuffer;
   }
 
-  // 3. Tesseract.js OCR with dedicated cachePath outside project root
+  // 3. Tesseract.js OCR with dedicated cachePath in OS temp directory & timeout protection
   let worker = null;
+  const OCR_TIMEOUT_MS = 30000; // 30-second timeout
+
   try {
     worker = await createWorker('eng', 1, {
       cachePath: TESSERACT_CACHE_DIR,
       logger: () => {}, // suppress noisy worker console logs
     });
 
-    const { data } = await worker.recognize(processedBuffer);
+    const recognizePromise = worker.recognize(processedBuffer);
+    const timeoutPromise = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error('OCR recognition timed out after 30 seconds')), OCR_TIMEOUT_MS)
+    );
+
+    const { data } = await Promise.race([recognizePromise, timeoutPromise]);
     return data && data.text ? data.text.trim() : '';
   } catch (ocrErr) {
-    console.error('[Tesseract] OCR recognition failed safely:', ocrErr.message);
-    return ''; // Return empty string so server handles smoothly
+    console.error('[Tesseract] OCR recognition failed or timed out safely:', ocrErr.message);
+    return ''; // Return empty string so server handles smoothly without crashing
   } finally {
     if (worker) {
       try {

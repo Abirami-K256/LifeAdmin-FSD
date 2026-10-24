@@ -1,61 +1,12 @@
-const nodemailer = require('nodemailer');
 const cron = require('node-cron');
 const Document = require('../models/Document');
 const User = require('../models/User');
 
-let transporter = null;
-
 /**
- * Initializes the Nodemailer transporter.
- * Falls back to an Ethereal test account if credentials are not configured.
- */
-async function getTransporter() {
-  if (transporter) return transporter;
-
-  const emailUser = process.env.EMAIL_USER;
-  const emailPass = process.env.EMAIL_PASS;
-
-  if (emailUser && emailPass && !emailUser.includes('example.com')) {
-    // Real SMTP / Gmail setup
-    transporter = nodemailer.createTransport({
-      service: 'gmail',
-      auth: {
-        user: emailUser,
-        pass: emailPass,
-      },
-    });
-  } else {
-    // Development fallback using Ethereal test account
-    console.log('[Email] No production email credentials set. Creating Ethereal test transporter...');
-    try {
-      const testAccount = await nodemailer.createTestAccount();
-      transporter = nodemailer.createTransport({
-        host: 'smtp.ethereal.email',
-        port: 587,
-        secure: false,
-        auth: {
-          user: testAccount.user,
-          pass: testAccount.pass,
-        },
-      });
-      console.log(`[Email] Ethereal test account initialized: ${testAccount.user}`);
-    } catch (etherealErr) {
-      console.warn('[Email] Could not create Ethereal account, falling back to mock JSON transport:', etherealErr.message);
-      transporter = nodemailer.createTransport({
-        jsonTransport: true,
-      });
-    }
-  }
-
-  return transporter;
-}
-
-/**
- * Sends a stylized reminder email to the document owner.
+ * Sends a stylized reminder email to the document owner via Brevo HTTPS API.
+ * Falls back to console logging in development if Brevo credentials are not configured.
  */
 async function sendExpiryEmail(userEmail, userName, docTitle, category, expiryDate, daysLeft) {
-  const mailer = await getTransporter();
-
   // Format calendar date without timezone shift
   const exp = new Date(expiryDate);
   const day = String(exp.getUTCDate()).padStart(2, '0');
@@ -66,7 +17,7 @@ async function sendExpiryEmail(userEmail, userName, docTitle, category, expiryDa
 
   const html = `
     <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e2e8f0; border-radius: 8px;">
-      <div style="background-color: #2563eb; padding: 15px; border-radius: 6px 6px 0 0; color: white;">
+      <div style="background-color: #023047; padding: 15px; border-radius: 6px 6px 0 0; color: white;">
         <h2 style="margin: 0; font-size: 20px;">LifeAdmin - Expiry Reminder</h2>
       </div>
       <div style="padding: 20px 0;">
@@ -86,19 +37,44 @@ async function sendExpiryEmail(userEmail, userName, docTitle, category, expiryDa
     </div>
   `;
 
-  const info = await mailer.sendMail({
-    from: `"LifeAdmin" <${process.env.EMAIL_USER || 'no-reply@lifeadmin.local'}>`,
-    to: userEmail,
-    subject: `Reminder: "${docTitle}" ${urgencyText} (${formattedDate})`,
-    html,
-  });
+  const subject = `Reminder: "${docTitle}" ${urgencyText} (${formattedDate})`;
+  const brevoApiKey = process.env.BREVO_API_KEY;
+  const mailFrom = process.env.MAIL_FROM;
 
-  // Log preview URL if using Ethereal
-  if (nodemailer.getTestMessageUrl(info)) {
-    console.log(`[Email] View preview at: ${nodemailer.getTestMessageUrl(info)}`);
+  if (brevoApiKey && mailFrom) {
+    try {
+      const response = await fetch('https://api.brevo.com/v3/smtp/email', {
+        method: 'POST',
+        headers: {
+          'accept': 'application/json',
+          'api-key': brevoApiKey,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          sender: { name: 'LifeAdmin', email: mailFrom },
+          to: [{ email: userEmail, name: userName || 'LifeAdmin User' }],
+          subject,
+          htmlContent: html,
+        }),
+      });
+
+      if (!response.ok) {
+        const errText = await response.text();
+        throw new Error(`Brevo API responded with ${response.status}: ${errText}`);
+      }
+
+      const result = await response.json();
+      console.log(`[Brevo Email] Sent successfully to ${userEmail} (MessageId: ${result.messageId})`);
+      return { success: true, messageId: result.messageId };
+    } catch (apiErr) {
+      console.error(`[Brevo Email Error] Failed to send email to ${userEmail}:`, apiErr.message);
+      throw apiErr;
+    }
+  } else {
+    // In development or when credentials are not configured, log to the terminal
+    console.log(`[Email Mock (Dev)] To: ${userEmail} | Subject: ${subject}`);
+    return { success: true, mocked: true };
   }
-
-  return info;
 }
 
 /**
@@ -178,21 +154,27 @@ async function checkAndSendReminders() {
 }
 
 /**
- * Starts the daily node-cron schedule (Runs every day at midnight 00:00).
+ * Starts the daily node-cron schedule (Runs every day at 11:00 PM / 23:00 IST).
  */
 function initCronJob() {
-  // Cron schedule: Run at midnight every day
-  cron.schedule('0 0 * * *', async () => {
-    console.log('[Cron] Running daily document expiry reminder check...');
-    try {
-      const summary = await checkAndSendReminders();
-      console.log(`[Cron] Completed check. Checked: ${summary.checked}, Sent: ${summary.sent}`);
-    } catch (err) {
-      console.error('[Cron] Error running reminder check:', err);
+  // Cron schedule: Run daily at 11:00 PM (23:00) IST
+  cron.schedule(
+    '0 23 * * *',
+    async () => {
+      console.log('[Cron] Running daily document expiry reminder check (11:00 PM IST)...');
+      try {
+        const summary = await checkAndSendReminders();
+        console.log(`[Cron] Completed check. Checked: ${summary.checked}, Sent: ${summary.sent}`);
+      } catch (err) {
+        console.error('[Cron] Error running reminder check:', err);
+      }
+    },
+    {
+      timezone: 'Asia/Kolkata',
     }
-  });
+  );
 
-  console.log('[Cron] Expiry reminder cron job scheduled (daily at 00:00).');
+  console.log('[Cron] Expiry reminder cron job scheduled (daily at 11:00 PM IST / 23:00 Asia/Kolkata).');
 }
 
 module.exports = {

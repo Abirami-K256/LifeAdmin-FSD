@@ -151,6 +151,33 @@ test('End-to-End API Test Suite', async (t) => {
     assert.equal(typeof data.summary.checked, 'number');
   });
 
+  await t.test('6b. Run external cron reminder endpoint with x-cron-secret', async () => {
+    process.env.CRON_SECRET = 'test_cron_secret_123';
+
+    // Request with missing header -> 401
+    const missingRes = await fetch(`${baseUrl}/reminders/run`, {
+      method: 'POST',
+    });
+    assert.equal(missingRes.status, 401);
+
+    // Request with wrong header -> 401
+    const wrongRes = await fetch(`${baseUrl}/reminders/run`, {
+      method: 'POST',
+      headers: { 'x-cron-secret': 'wrong_secret' },
+    });
+    assert.equal(wrongRes.status, 401);
+
+    // Request with correct header -> 200
+    const successRes = await fetch(`${baseUrl}/reminders/run`, {
+      method: 'POST',
+      headers: { 'x-cron-secret': 'test_cron_secret_123' },
+    });
+    assert.equal(successRes.status, 200);
+    const successData = await successRes.json();
+    assert.ok(successData.success);
+    assert.equal(typeof successData.sent, 'number');
+  });
+
   await t.test('7. Update and delete document', async () => {
     // Update
     const updateRes = await fetch(`${baseUrl}/documents/${createdDocId}`, {
