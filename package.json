@@ -1,9 +1,12 @@
+
 {
   "name": "lifeadmin",
   "version": "1.0.0",
   "private": true,
   "description": "LifeAdmin - Personal Document Organizer with OCR and Expiry Reminders",
   "scripts": {
+    "build": "npm --prefix client run build",
+    "start": "npm --prefix server start",
     "server": "npm --prefix server run dev",
     "client": "npm --prefix client run dev",
     "test": "npm --prefix server test",
