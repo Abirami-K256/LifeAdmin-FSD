@@ -54,6 +54,22 @@ app.use('/api/auth', authRoutes);
 app.use('/api/documents', documentRoutes);
 app.use('/api/reminders', reminderRoutes);
 
+// Serve React frontend in production
+if (process.env.NODE_ENV === 'production') {
+  const frontendPath = path.join(__dirname, '../client/dist');
+
+  app.use(express.static(frontendPath));
+
+  // Support React Router routes
+  app.get('*', (req, res, next) => {
+    if (req.path.startsWith('/api/')) {
+      return next();
+    }
+
+    res.sendFile(path.join(frontendPath, 'index.html'));
+  });
+}
+
 // Global Error Handler
 app.use(errorHandler);
 
